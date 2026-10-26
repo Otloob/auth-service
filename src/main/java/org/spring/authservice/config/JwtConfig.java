@@ -12,6 +12,7 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+import org.springframework.security.oauth2.jwt.BadJwtException;
 import com.nimbusds.jose.jwk.source.ImmutableSecret;
 
 @Configuration
@@ -35,7 +36,30 @@ public class JwtConfig {
     JwtDecoder jwtDecoder(SecretKey key, @Value("${auth.jwt.issuer}") String issuer) {
         NimbusJwtDecoder decoder = NimbusJwtDecoder.withSecretKey(key).macAlgorithm(MacAlgorithm.HS256).build();
         decoder.setJwtValidator(org.springframework.security.oauth2.jwt.JwtValidators.createDefaultWithIssuer(issuer));
-        return decoder;
+        return token -> {
+            validateCanonicalEncoding(token);
+            return decoder.decode(token);
+        };
+    }
+
+    private static void validateCanonicalEncoding(String token) {
+        String[] segments = token.split("\\.", -1);
+        if (segments.length != 3) throw new BadJwtException("JWT must contain three compact segments");
+
+        Base64.Decoder decoder = Base64.getUrlDecoder();
+        Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
+        for (String segment : segments) {
+            if (segment.isEmpty() || !segment.matches("[A-Za-z0-9_-]+")) {
+                throw new BadJwtException("JWT contains an invalid Base64URL segment");
+            }
+            try {
+                if (!encoder.encodeToString(decoder.decode(segment)).equals(segment)) {
+                    throw new BadJwtException("JWT uses a non-canonical Base64URL encoding");
+                }
+            } catch (IllegalArgumentException exception) {
+                throw new BadJwtException("JWT contains an invalid Base64URL segment", exception);
+            }
+        }
     }
 
     @Bean
