@@ -1,6 +1,9 @@
 package org.spring.authservice.service;
 
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.UUID;
 import org.spring.authservice.config.JwtConfig.TokenLifetimes;
 import org.spring.authservice.entity.RefreshToken;
@@ -49,7 +52,8 @@ public class AuthService {
     public IssuedTokens login(String email, String password, String deviceName, String existingRefreshToken) {
         String normalized = normalizeEmail(email);
         UserAccount user = users.findByEmail(normalized)
-                .filter(account -> passwords.matches(password, account.getPasswordHash()))
+                .filter(account -> account.getPasswordHash() != null
+                        && passwords.matches(password, account.getPasswordHash()))
                 .orElseThrow(() -> new AuthException("Invalid email or password"));
 
         SessionDetails existingSession = findSessionToReuse(existingRefreshToken, user);
@@ -60,16 +64,44 @@ public class AuthService {
     }
 
     @Transactional
-    public IssuedTokens refresh(String refreshToken) {
+    public IssuedTokens loginWithGoogle(String email, String deviceName) {
+        String normalized = normalizeEmail(email);
+        UserAccount user = users.findByEmail(normalized)
+                .orElseGet(() -> users.save(new UserAccount(normalized, null)));
+        return issueTokens(user, normalizeDeviceName(deviceName), UUID.randomUUID().toString());
+    }
+
+    @Transactional
+    public RefreshResult refresh(String refreshToken) {
         var claims = decoder.decode(refreshToken);
         if (!"refresh".equals(claims.getClaimAsString("token_use"))) throw new AuthException("Invalid refresh token");
         String tokenId = claims.getId();
-        RefreshToken stored = refreshTokens.findById(tokenId).orElseThrow(() -> new AuthException("Refresh token is no longer valid"));
-        if (stored.isRevoked() || stored.getExpiresAt().isBefore(Instant.now())) throw new AuthException("Refresh token is no longer valid");
-        refreshTokens.delete(stored);
+        RefreshToken stored = refreshTokens.findByTokenIdForUpdate(tokenId)
+                .orElseThrow(() -> new AuthException("Refresh token is no longer valid"));
+        String sessionId = stored.getSessionId();
+        if (sessionId == null || !sessionId.equals(claims.getClaimAsString("session_id"))
+                || !stored.getUserId().toString().equals(claims.getSubject())) {
+            throw new AuthException("Refresh token is no longer valid");
+        }
+        if (stored.getExpiresAt().isBefore(Instant.now())) throw new AuthException("Refresh token is no longer valid");
+
+        String presentedHash = hashRefreshToken(refreshToken);
+        if (stored.getTokenHash() != null && !MessageDigest.isEqual(
+                stored.getTokenHash().getBytes(StandardCharsets.US_ASCII), presentedHash.getBytes(StandardCharsets.US_ASCII))) {
+            revokeSession(sessionId);
+            return new RefreshResult(null, true);
+        }
+        if (stored.isRevoked()) {
+            revokeSession(sessionId);
+            return new RefreshResult(null, true);
+        }
+
+        // Rows created before V5 have no hash; their signed JWT and persisted token ID still identify them.
+        stored.setTokenHash(presentedHash);
+        stored.revoke();
         UserAccount user = users.findById(stored.getUserId()).orElseThrow(() -> new AuthException("User no longer exists"));
-        String sessionId = stored.getSessionId() == null ? UUID.randomUUID().toString() : stored.getSessionId();
-        return issueTokens(user, normalizeDeviceName(stored.getDeviceName()), sessionId);
+        IssuedTokens issued = issueTokens(user, normalizeDeviceName(stored.getDeviceName()), sessionId);
+        return new RefreshResult(issued, false);
     }
 
     @Transactional
@@ -83,13 +115,27 @@ public class AuthService {
 
     private IssuedTokens issueTokens(UserAccount user, String deviceName, String sessionId) {
         Instant now = Instant.now();
+        refreshTokens.deleteAllByExpiresAtBefore(now);
         String access = encode(user, "access", UUID.randomUUID().toString(), sessionId, now, now.plus(lifetimes.access()));
         String refreshId = UUID.randomUUID().toString();
         Instant refreshExpiry = now.plus(lifetimes.refresh());
         String refresh = encode(user, "refresh", refreshId, sessionId, now, refreshExpiry);
-        refreshTokens.save(new RefreshToken(refreshId, user.getId(), sessionId, deviceName, refreshExpiry));
+        refreshTokens.save(new RefreshToken(refreshId, hashRefreshToken(refresh), user.getId(), sessionId, deviceName, refreshExpiry));
         return new IssuedTokens(access, refresh, "Bearer", lifetimes.access().toSeconds(), sessionId,
                 user.getId(), user.getEmail());
+    }
+
+    private void revokeSession(String sessionId) {
+        for (RefreshToken token : refreshTokens.findAllBySessionIdForUpdate(sessionId)) token.revoke();
+    }
+
+    private static String hashRefreshToken(String token) {
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(token.getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
     }
 
     private SessionDetails findSessionToReuse(String refreshToken, UserAccount authenticatedUser) {
@@ -105,8 +151,12 @@ public class AuthService {
 
         RefreshToken stored = refreshTokens.findById(claims.getId()).orElse(null);
         if (stored == null) return null;
-        if (stored.isRevoked() || stored.getExpiresAt().isBefore(Instant.now())) {
+        if (stored.getExpiresAt().isBefore(Instant.now())) {
             refreshTokens.delete(stored);
+            return null;
+        }
+        if (stored.isRevoked()) {
+            if (stored.getSessionId() != null) revokeSession(stored.getSessionId());
             return null;
         }
 
@@ -152,4 +202,5 @@ public class AuthService {
     }
 
     private record SessionDetails(String sessionId, String deviceName) {}
+    public record RefreshResult(IssuedTokens tokens, boolean reuseDetected) {}
 }

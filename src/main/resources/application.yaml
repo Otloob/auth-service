@@ -3,4 +3,5 @@ spring:
     name: auth-service
   config:
     import:
+      - "optional:file:.env[.properties]"
       - "configserver:${CONFIG_SERVER_URI}"

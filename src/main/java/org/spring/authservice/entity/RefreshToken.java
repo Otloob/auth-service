@@ -15,6 +15,8 @@ import jakarta.persistence.Column;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class RefreshToken {
     @Id private String tokenId;
+    @Column(length = 64)
+    private String tokenHash;
     private Long userId;
     @Column(length = 36)
     private String sessionId;
@@ -22,12 +24,14 @@ public class RefreshToken {
     private String deviceName;
     private Instant expiresAt;
     private boolean revoked;
-    public RefreshToken(String tokenId, Long userId, String sessionId, String deviceName, Instant expiresAt) {
+    public RefreshToken(String tokenId, String tokenHash, Long userId, String sessionId, String deviceName, Instant expiresAt) {
         this.tokenId = tokenId;
+        this.tokenHash = tokenHash;
         this.userId = userId;
         this.sessionId = sessionId;
         this.deviceName = deviceName;
         this.expiresAt = expiresAt;
     }
     public void revoke() { revoked = true; }
+    public void setTokenHash(String tokenHash) { this.tokenHash = tokenHash; }
 }

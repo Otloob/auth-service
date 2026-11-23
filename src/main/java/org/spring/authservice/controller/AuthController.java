@@ -72,7 +72,11 @@ public class AuthController {
         if (refreshToken == null || refreshToken.isBlank()) {
             throw new AuthException("Refresh token cookie is required");
         }
-        IssuedTokens tokens = auth.refresh(refreshToken);
+        AuthService.RefreshResult result = auth.refresh(refreshToken);
+        if (result.reuseDetected()) {
+            throw new AuthException("Refresh token reuse detected; this session has been revoked", HttpStatus.UNAUTHORIZED);
+        }
+        IssuedTokens tokens = result.tokens();
         addRefreshCookie(tokens.refreshToken(), response);
         return new RefreshResponse(tokens.accessToken(), tokens.tokenType(), tokens.expiresIn(), tokens.sessionId());
     }
