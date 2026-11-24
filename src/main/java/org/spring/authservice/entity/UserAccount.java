@@ -19,8 +19,6 @@ public class UserAccount {
     private Long id;
     @Column(nullable = false, unique = true)
     private String email;
-    @Column
-    private String passwordHash;
 
-    public UserAccount(String email, String passwordHash) { this.email = email; this.passwordHash = passwordHash; }
+    public UserAccount(String email) { this.email = email; }
 }

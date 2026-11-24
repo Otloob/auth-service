@@ -15,14 +15,14 @@ spring:
       client:
         registration:
           google:
-            client-id: ${GOOGLE_CLIENT_ID}
-            client-secret: ${GOOGLE_CLIENT_SECRET}
+            client-id: ${GOOGLE_AUTH_CLIENT_ID}
+            client-secret: ${GOOGLE_AUTH_CLIENT_SECRET}
             scope: [openid, profile, email]
 ```
 
-Create a Google OAuth 2.0 Web application client and register `http://localhost:8080/login/oauth2/code/google` as an authorized redirect URI. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in the auth-service process environment (or config server environment). The Google login entry point is `GET /oauth2/authorization/google`; after consent Google redirects to the callback and the service responds with its normal access-token JSON plus the HttpOnly `refreshToken` cookie. A verified Google email creates a passwordless local account on first sign-in; later sign-ins use the same account. Existing password accounts with the same normalized email are linked to that Google identity.
+Create a Google OAuth 2.0 Web application client and register `http://localhost:8081/login/oauth2/code/google` as an authorized redirect URI (adjust the port if `AUTH_SERVICE_PORT` differs). Set `GOOGLE_AUTH_CLIENT_ID` and `GOOGLE_AUTH_CLIENT_SECRET` in the auth-service process environment or Config Server environment. The login entry point is `GET /oauth2/authorization/google`; after consent, Google redirects to the callback and the service returns its access-token JSON plus the HttpOnly `refreshToken` cookie. Google identities are stored by provider and Google's stable `sub` identifier. A verified Google email matching an existing local account is linked to that account.
 
-Copy `.env.example` to `.env` and replace the placeholders. Spring Boot does not load `.env` automatically. In a Bash shell, load it before starting the app:
+Copy `.env.example` to `.env` and replace the placeholders. `application.yaml` imports this file as optional properties. In a Bash shell, export them before starting the app:
 
 ```bash
 set -a
@@ -46,16 +46,18 @@ In IntelliJ, add the variables to the run configuration's environment variables.
 
 Register and login accept JSON with `email` and `password`. The refresh token is set as an HttpOnly cookie; refresh requests need no JSON body. Send the access token to protected routes as `Authorization: Bearer <access-token>`. Postman can store the login response's `accessToken` in an environment variable and automatically retain the refresh cookie for the same host.
 
-`POST /auth/refresh` rotates the refresh token on every successful use. The previous token is retained as a revoked token record (only its SHA-256 hash is stored) until it expires. Reuse of a rotated token revokes all refresh tokens for that device session and returns `401`; the user must sign in again. Keep the refresh cookie enabled so the client receives the replacement token on each successful refresh.
+User accounts are stored separately from sign-in credentials: password hashes live in `password_credentials`, and external identities live in `oauth_identities`. A user may have a password credential, one or more provider identities, or both. Migration V6 intentionally drops and recreates all auth tables and data for the development schema reset; do not apply it to a database whose data must be retained. Migration V7 resets refresh sessions into the per-session token-hash structure, so existing sessions must sign in again.
+
+`POST /auth/refresh` rotates the refresh token on every successful use. The database stores one row per device session with only the current token's SHA-256 hash; it does not retain previous tokens. Reuse of a rotated token fails the hash comparison, revokes that session, and returns `401`; the user must sign in again. Keep the refresh cookie enabled so the client receives the replacement token on each successful refresh.
 
 For curl, use a cookie jar so repeat logins from the same terminal can present the existing refresh token: `curl -c cookies.txt -b cookies.txt ...`. Without `-b`, curl does not send the saved cookie, so each successful login starts a new session.
 
 ### Test Google sign-in with Postman (no frontend)
 
-1. Set up the Google OAuth client above and start the service. Ensure the callback URL exactly matches `http://localhost:8080/login/oauth2/code/google`.
-2. In Postman, create a request with method `GET` and URL `http://localhost:8080/oauth2/authorization/google`. Send it with automatic redirect following enabled. Postman opens the Google sign-in/consent redirect chain and completes the callback; sign in with a Google account added as a test user if the OAuth consent screen is in testing mode.
+1. Set up the Google OAuth client above and start the service. Ensure the callback URL exactly matches `http://localhost:8081/login/oauth2/code/google`.
+2. In Postman, create a request with method `GET` and URL `http://localhost:8081/oauth2/authorization/google`. Send it with automatic redirect following enabled. Postman opens the Google sign-in/consent redirect chain and completes the callback; sign in with a Google account added as a test user if the OAuth consent screen is in testing mode.
 3. The final callback response is JSON containing `accessToken`, `tokenType`, `expiresIn`, `userId`, `email`, and `sessionId`. Postman stores the `refreshToken` cookie for `localhost` automatically.
-4. Copy `accessToken` into `Authorization: Bearer <access-token>` on a protected request such as `GET http://localhost:8080/hello`. Use `POST /auth/refresh` to rotate the stored cookie and obtain a fresh access token; `POST /auth/logout` revokes that session.
+4. Copy `accessToken` into `Authorization: Bearer <access-token>` on a protected request such as `GET http://localhost:8081/hello`. Use `POST /auth/refresh` to rotate the stored cookie and obtain a fresh access token; `POST /auth/logout` revokes that session.
 
 If Postman cannot complete Google consent in its redirect window, open the same authorization URL in a browser; the callback still returns the token JSON there. For a Postman-only flow, use Postman's OAuth 2.0 authorization helper with Google authorization/token endpoints and the same client, then note that this service's browser callback flow is the one that creates/links the local user and issues its own app tokens.
 
